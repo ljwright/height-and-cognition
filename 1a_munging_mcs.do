@@ -14,7 +14,7 @@ program define fix_cnum
 	}
 end
 
-use MCSID COUNTRY GOVWT2 NOCMHH using ///
+use MCSID COUNTRY GOVWT2 NOCMHH WEIGHTGB using ///
 	"${raw}/MCS/xwave/mcs_longitudinal_family_file.dta", clear
 expand 2, gen(XX)
 gen CNUM00 = XX + 1
@@ -187,6 +187,8 @@ clonevar father_household = ADFINH00
 gen mother_height = ADMHGT00 * 100 if ADMHGT00 >= 1.4
 gen father_height = APHGTM00 * 100 if APHGTM00 >= 1.4
 gen parent_height = inrange(ADMHGT00, 0, 1.39) | inrange(APHGTM00, 0, 1.39)
+replace mother_height = . if mother_height < 140
+replace father_height = . if father_height < 140
 
 gen mother_bmi = ADMBMI00 if ADMBMI00 > 0
 gen father_bmi = APDBMIA0 if APDBMIA0 > 0
@@ -229,12 +231,12 @@ tab father_class csep, m
 // Format
 keep if inrange(COUNTRY, 1, 3) // DROP NORTHERN IRELAND
 keep if NOCMHH == 1 & CNUM00 == 1 // KEEP SINGLETON BIRTHS
-keep if ethnic_group == 1 // WHITE
 rename mcsid id
-gen survey_weight = GOVWT2 if GOVWT2 >= 0
-gen cohort = "MCS"
-keep id cohort survey_weight male /// ethnic_group ///
-	mother_* father_* parent_height ///
-	age_* height_* maths_* verbal_* vocab_*
+gen survey_weight = WEIGHTGB if WEIGHTGB >= 0 //GOVWT2 if GOVWT2 >= 0
+gen cohort = "2001c"
+keep id cohort survey_weight male ethnic_group ///
+	age_* height_* bmi_* /// ethnic_group ///
+	maths_* verbal_* vocab_* ///
+	mother_* father_* parent_height
 compress
-save "${clean}/mcs_cleaned.dta", replace
+save "${clean}/2001c_cleaned.dta", replace

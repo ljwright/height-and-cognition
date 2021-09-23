@@ -106,6 +106,7 @@ mod_specs <- df_cog %>%
   expand_grid(cog_score = c("rank", "z", "ridit"),
               height_score = glue("height_{c('raw', 'chart', 'rank', 'ridit', 'z')}"),
               sex = c("all", "male", "female"),
+              weights = c(TRUE, FALSE),
               covars = 1:length(mod_covars)) %>%
   mutate(spec_id = row_number(), .before = 1)
 
@@ -122,7 +123,9 @@ get_df <- function(spec_id){
   inv <- df_inv %>%
     filter(cohort == spec$cohort, 
            male %in% mod_sexes[[spec$sex]]) %>%
-    select(id, all_of(mod_covars[[spec$covars]]))
+    select(id, all_of(mod_covars[[spec$covars]]), survey_weight)
+  
+  if (spec$weights == FALSE) inv$survey_weight <- 1
   
   ht <- df_height %>%
     filter(cohort == spec$cohort, fup == spec$fup) %>%
@@ -156,7 +159,7 @@ run_mod <- function(spec_id){
   
   mod <- get_func(spec_id) %>%
     as.formula() %>%
-    lm(df)
+    lm_robust(df, weights = survey_weight)
   
   broom::tidy(mod, conf.int = TRUE) %>%
     filter(term == "cog") %>%

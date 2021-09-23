@@ -126,9 +126,11 @@ gen_residuals maths_16 vocab_16 comp_16, covars(bversion)
 gen mother_height = e1_1 if e1_1 >= 140 // a0197 as alternative. Not 100% correlated.
 gen father_height = e2_1 if e2_1 >= 140
 gen parent_height = inrange(e1_1, 0, 139) | inrange(e2_1, 0, 139)
+replace mother_height = . if mother_height < 140
+replace father_height = . if father_height < 140
 
-gen mother_weight =  e1_2 if e1_2 >= 0 // Minimum is 29kg!
-gen father_weight =  e2_2 if e2_2 >= 0
+gen mother_weight = e1_2 if e1_2 >= 0 // Minimum is 29kg!
+gen father_weight = e2_2 if e2_2 >= 0
 
 gen mother_bmi = mother_weight / ( (mother_height / 100) ^ 2)
 gen father_bmi = father_weight / ( (father_height / 100) ^ 2)
@@ -159,11 +161,11 @@ drop if  BD1CNTRY == 4 // Drop Northern Ireland
 keep if MULTIPNO == -1 | a0248 == 1 // Singleton births
 
 rename bcsid id
-gen cohort = "BCS70"
+gen cohort = "1970c"
 gen survey_weight = 1
 keep id cohort survey_weight male ///
-	age_* height_* ///
+	age_* height_* bmi_* ///
 	maths_* verbal_* vocab_* comp_* home_test ///
 	father_* mother_* parent_height
 compress 
-save "${clean}/70c_cleaned.dta", replace 
+save "${clean}/1970c_cleaned.dta", replace 

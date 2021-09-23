@@ -88,11 +88,11 @@ label_class
 keep if n1811 == 0 // SINGLETON BIRTHS
 
 rename ncdsid id
-gen cohort = "NCDS"
+gen cohort = "1958c"
 gen survey_weight = 1
 keep id cohort survey_weight male ///
-	age_* height_* ///
+	age_* height_* bmi_* ///
 	maths_* verbal_* vocab_* ///
 	father_* mother_* parent_height
 compress
-save "${clean}/58c_cleaned.dta", replace
+save "${clean}/1958c_cleaned.dta", replace

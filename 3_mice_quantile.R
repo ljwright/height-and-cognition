@@ -3,15 +3,13 @@ library(haven)
 library(glue)
 library(gallimaufr)
 library(ridittools)
-library(DescTools)
 library(broom)
 library(furrr)
 library(tictoc)
-library(specr)
-library(lme4)
 library(mice)
 library(quantreg)
 library(magrittr)
+library(estimatr)
 
 rm(list = ls())
 
@@ -34,8 +32,8 @@ for(cohort in names(df_raw)){
   df <- df_raw[[cohort]] %>%
     drop_na(male) %>%
     select(id, cohort, survey_weight, male,
-           matches("height_chart"), matches("resid"),
-           mother_height, father_height, 
+           matches("chart"), matches("resid"),
+           mother_height, father_height,
            father_class, mother_edu_level, father_edu_level) %>%
     mutate(across(matches("resid"), to_ridit))
   
@@ -58,6 +56,7 @@ rm(df, df_mice, temp, pred, male, cohort)
 
 save(imp, file = "Data/mice.Rdata")
 
+# 3. Run Regressions ----
 load("Data/mice.Rdata")
 imp_long <- map(imp,
                 ~ complete(.x, "long", TRUE) %>%
@@ -66,7 +65,6 @@ imp_long <- map(imp,
                   select(-.id))
 rm(imp)
 
-# 3. Run Regressions ----
 mod_covars <- list(basic = "1",
                    sep = c("father_class", "mother_edu_level"),
                    height = c("father_class", "mother_edu_level", 
@@ -83,25 +81,30 @@ mod_specs <- df_obs %>%
   unnest(x_var) %>%
   expand_grid(sex = c("all", "male", "female"),
               mod = names(mod_covars),
-              type = c("cc", "mi")) %>%
+              type = c("cc", "mi"),
+              weights = c(TRUE, FALSE)) %>%
+  filter(weights == TRUE | str_detect(cohort, "(1946|2001)"),
+         !str_detect(x_var, "comp")) %>%
   mutate(spec_id = row_number(), .before = 1)
 
 get_result <- function(spec_id){
   spec <- slice(mod_specs, !!spec_id)
   
-  obs <- df_obs %>%
-    filter(cohort == spec$cohort,
-           age == spec$age)
+  # obs <- df_obs %>%
+  #   filter(cohort == spec$cohort,
+  #          age == spec$age)
   
   df_reg <- imp_long[[spec$cohort]] %>%
     filter(male %in% mod_sex[[spec$sex]]) %>%
-    semi_join(obs, by = "id") %>%
+    # semi_join(obs, by = "id") %>%
     rename(x_var = all_of(spec$x_var))
+  
+  if (spec$weights == FALSE) df_reg$survey_weight <- 1
   
   mod_form <- glue("height_chart_{spec$age} ~ x_var + {mod_covars[[spec$mod]]}")
   if (spec$sex == "all") mod_form <- glue("{mod_form} + male")
   
-  run_mod <- function(df) lm(as.formula(mod_form), df)
+  run_mod <- function(df) lm_robust(as.formula(mod_form), df, survey_weight)
   
   if (spec$type == "cc"){
     
@@ -125,37 +128,34 @@ get_result <- function(spec_id){
            lci = conf.low, uci = conf.high)
 }
 
-cohort_dict <- c("46c" = "1946c", "58c" = "1958c",
-                 "70c" = "1970c", "mcs" = "2001c")
 mod_dict <- c(basic = "Sex-Adjusted",
               sep = "+ SEP",
               height = "+ Parental Height")
 
 df_res <- mod_specs %>%
   mutate(map_dfr(spec_id, get_result)) %>%
-  mutate(cohort_clean = factor(cohort_dict[cohort], cohort_dict) %>%
-           fct_rev(),
+  mutate(cohort_clean = fct_rev(cohort),
          mod_clean = factor(mod_dict[mod], mod_dict)) %>%
-  mutate(cohort_clean = factor(cohort_dict[cohort], cohort_dict) %>%
-           fct_rev(),
-         mod_clean = factor(mod_dict[mod], mod_dict)) %>%
-  filter(!str_detect(x_var, "comp")) %>%
   mutate(x_var = str_sub(x_var, 1, -10),
          age = ifelse(as.integer(age) < 14, 11, 16),
          x_var = glue("{str_to_title(x_var)} @ age {age}"),
-         string = glue("{round(beta, 2)} ({round(lci, 2)}, {round(uci, 2)})"))
+         string = glue("{round(beta, 2)} ({round(lci, 2)}, {round(uci, 2)})")) %>%
+  uncount(ifelse(cohort %in% c("1958c", "1970c"), 2, 1), .id = "uncount") %>%
+  mutate(weights = ifelse(uncount == 2, FALSE, weights)) %>%
+  select(-uncount)
 
-plot_res <- function(sex, type){
+plot_main <- function(type, weights){
   p <- df_res %>%
-    filter(sex == !!sex, type == !!type) %>%
+    filter(sex == "all", type == !!type, weights == !!weights) %>%
     ggplot() +
     aes(x = cohort_clean, y = beta, ymin = lci, 
         ymax = uci, label = string) +
     facet_grid(x_var ~ mod_clean, switch = "y", scales = "free_y") +
     geom_hline(yintercept = 0, linetype = "dashed") +
     geom_pointrange(position = position_dodge(0.5)) +
-    geom_text(size = 4, y = Inf, vjust = 0, hjust = 1.1) +
-    scale_y_continuous(expand = c(0.05, 0.4)) +
+    geom_text(aes(as.numeric(cohort_clean) + 0.2),
+              size = 4, y = Inf, vjust = 0, hjust = 1.1) +
+    scale_y_continuous(expand = c(0.05, 0.5)) +
     coord_flip() +
     theme_bw() +
     theme(strip.placement = "outside",
@@ -165,15 +165,49 @@ plot_res <- function(sex, type){
           legend.position = "none") +
     labs(x = NULL, y = "Marginal Effect")
   
-  glue("Images/main_{type}_{sex}.png") %>%
+  weight_stub <- ifelse(weights == TRUE, "weighted", "unweighted")
+  
+  glue("Images/main_{type}_{weight_stub}.png") %>%
     ggsave(plot = p, width = 29.7, height = 21, units = "cm")
   
   return(p)
 }
 
 df_res %>%
-  distinct(sex, type) %$%
-  map2(sex, type, plot_res)
+  distinct(type, weights) %$%
+  map2(type, weights, plot_main)
+
+plot_sex <- function(type, weights){
+  p <- df_res %>%
+    filter(sex != "all", type == !!type, weights == !!weights) %>%
+    mutate(sex_clean = str_to_title(sex)) %>%
+    ggplot() +
+    aes(x = cohort_clean, y = beta, ymin = lci, 
+        ymax = uci, label = string, color = sex_clean) +
+    facet_grid(x_var ~ mod_clean, switch = "y", scales = "free_y") +
+    geom_hline(yintercept = 0, linetype = "dashed") + 
+    geom_pointrange(position = position_dodge(0.5))  +
+    scale_color_brewer(palette = "Dark2") +
+    coord_flip() +
+    theme_bw() +
+    theme(strip.placement = "outside",
+          strip.text.y.left = element_text(angle = 0),
+          strip.background.y = element_blank(),
+          axis.title = element_text(size = rel(0.8)),
+          legend.position = "bottom") +
+    labs(x = NULL, y = "Marginal Effect", color = NULL)
+  
+  weight_stub <- ifelse(weights == TRUE, "weighted", "unweighted")
+  
+  glue("Images/sex_{type}_{weight_stub}.png") %>%
+    ggsave(plot = p, width = 29.7, height = 21, units = "cm")
+  
+  return(p)
+}
+
+df_res %>%
+  distinct(type, weights) %$%
+  map2(type, weights, plot_sex)
 
 
 # 4. Get Quantile Regressions ----
@@ -185,18 +219,21 @@ get_qreg <- function(spec_id){
            male %in% mod_sex[[spec$sex]]) %>%
     rename(x_var = all_of(spec$x_var))
   
+  if (spec$weights == FALSE) df_reg$survey_weight <- 1
+  
   mod_form <- glue("height_chart_{spec$age} ~ x_var + {mod_covars[[spec$mod]]}")
   if (spec$sex == "all") mod_form <- glue("{mod_form} + male")
   
   as.formula(mod_form) %>%
-    rq(tau = 1:9/10, data = df_reg) %>%
+    rq(tau = 1:9/10, data = df_reg, weights = survey_weight) %>%
     tidy() %>%
     filter(term == "x_var") %>%
     select(tau, beta = estimate, lci = conf.low, uci = conf.high)
 }
 
 df_q <- mod_specs %>%
-  filter(type == "cc") %>%
+  filter(type == "cc", sex == "all") %>%
+  filter(mod == "basic", weights = TRUE) %>%
   mutate(res = map(spec_id, get_qreg)) %>%
   unnest(res)
 
@@ -205,19 +242,20 @@ df_clean <- df_q %>%
          age = ifelse(as.integer(age) < 14, 11, 16),
          x_var = glue("{str_to_title(x_var)} @ age {age}")) %>%
   filter(type == "cc", sex == "all", 
-         x_var != "Comp @ age 16", mod == "sep") %>%
+         x_var != "Comp @ age 16", mod == "basic") %>%
   mutate(tau_clean = glue("{tau*100}th"),
-         cohort_clean = factor(cohort_dict[cohort], cohort_dict),
          cohort_f = cohort)
 
-ggplot(df_clean) +
+df_clean %>%
+  filter(weights == TRUE) %>%
+  ggplot() +
   aes(x = tau_clean, y = beta, ymin = lci, ymax = uci, group = cohort) +
-  facet_grid(x_var ~ cohort_clean, switch = "y", scales = "free") +
+  facet_grid(x_var ~ cohort, switch = "y", scales = "free") +
   geom_hline(yintercept = 0, linetype = "dashed") +
   geom_ribbon(alpha = 0.2, color = NA) +
   geom_line() +
   geom_line(aes(group = cohort_f),
-            data = select(df_clean, -cohort_clean),
+            data = select(df_clean, -cohort),
             linetype = "dotted") +
   guides(color = "none", fill = "none") +
   labs(x = "Percentile", y = NULL) +
@@ -228,4 +266,61 @@ ggplot(df_clean) +
         axis.title = element_text(size = rel(0.8)),
         axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
         legend.position = "none")
+ggsave("Images/quantile.png", width = 29.7, height = 21, units = "cm")
+
+
+# Multiply Imputed Data
+get_mi <- function(spec_id){
+  spec <- slice(mod_specs, !!spec_id)
   
+  mod_form <- glue("height_chart_{spec$age} ~ x_var + {mod_covars[[spec$mod]]}")
+  if (spec$sex == "all") mod_form <- glue("{mod_form} + male")
+  
+  get_df <- function(imp){
+    obs <- df_obs %>%
+      filter(cohort == spec$cohort,
+             age == spec$age)
+    
+    df_reg <- imp_long[[spec$cohort]] %>%
+      filter(imp == !!imp,
+             male %in% mod_sex[[spec$sex]]) %>%
+      semi_join(obs, by = "id") %>%
+      rename(x_var = all_of(spec$x_var))
+    
+    if (spec$weights == FALSE) df_reg$survey_weight <- 1
+    
+    return(df_reg)
+  }
+  
+  run_mods <- function(imp){
+    df <- get_df(imp)
+    
+    run_mod <- function(boot, df){
+      set.seed(boot)
+      as.formula(mod_form) %>%
+        rq(tau = 1:9/10, data = sample_frac(df), 
+           weights = survey_weight) %>%
+        tidy() %>%
+        filter(term == "x_var") %>%
+        select(tau, estimate)
+    }
+    
+    map_dfr(1:20, run_mod, df)
+  }
+  
+  get_ci <- function(estimate){
+    quantile(estimate, probs = c(.5, .025, .975)) %>% 
+      set_names(c("beta", "lci", "uci")) %>%
+      as_tibble_row()
+  }
+  
+  map_dfr(1:3, run_mods) %>%
+    group_by(tau) %>%
+    summarise(get_ci(estimate))
+}
+
+
+
+
+mod_specs %>%
+  filter(mod == "basic", type == "mi", sex == "all", weights == TRUE)

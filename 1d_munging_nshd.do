@@ -85,12 +85,13 @@ foreach var of varlist fsc50 fsc57{
 
 
 // Format Dataset
-gen survey_weight = inf
+egen total_weight = total(inf)
+gen survey_weight = inf * _N / total_weight
 tostring nshdid_db1120, gen(id)
-gen cohort = "NSHD"
+gen cohort = "1946c"
 keep id cohort survey_weight male ///
-	age_* height_* ///
+	age_* height_* bmi_* ///
 	maths_* verbal_* vocab_* ///
 	father_* mother_* parent_height
 compress
-save "${clean}/46c_cleaned.dta", replace
+save "${clean}/1946c_cleaned.dta", replace
