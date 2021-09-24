@@ -21,7 +21,7 @@ load_dta <- function(cohort){
     as_factor() %>%
     zap_label() %>%
     zap_formats() %>%
-    select(-matches("^age_"))
+    select(-matches("_chart_"))
 }
 
 df_raw <- c("1946c", "1958c", "1970c", "2001c") %>%
@@ -30,12 +30,13 @@ df_raw <- c("1946c", "1958c", "1970c", "2001c") %>%
 
 rm(load_dta)
 
-
 # Number with Parent Height < 1.4m
 map_dbl(df_raw, ~ sum(.x$parent_height))
+map_dbl(df_raw, ~ sum(is.na(.x$male)))
 
 df_raw <- map(df_raw,
               ~ .x %>%
+                drop_na(male) %>%
                 filter(is.na(parent_height) | parent_height == 0))
 
 # Add 2001c White Data
@@ -44,6 +45,41 @@ df_raw$`2001c_white` <- df_raw$`2001c` %>%
   mutate(cohort = "2001c_white")
 
 save(df_raw, file = "Data/df_raw.Rdata")
+
+
+# 2. Multiple Imputation ----
+tic()
+imp <- list()
+for(cohort in names(df_raw)){
+  df <- df_raw[[cohort]] %>%
+    select(id, cohort, survey_weight, male,
+           matches("^(bmi|height)"), matches("resid"),
+           mother_height, father_height,
+           father_class, mother_edu_level, father_edu_level)
+  
+  pred <- make.predictorMatrix(df)
+  pred[, c("id", "cohort", "male")] <- 0
+  
+  temp <- list()
+  for (male in c(0, 1)){
+    df_mice <- filter(df, male == !!male)
+    
+    temp[[male + 1]] <- parlmice(df_mice, n.core = 4, n.imp.core = 8,
+                                 predictorMatrix = pred,
+                                 defaultMethod = c("rf", "logreg", "polyreg", "polr"))
+  }
+  
+  imp[[cohort]] <- rbind(temp[[1]], temp[[2]])
+}
+toc()
+
+rm(df, df_mice, temp, pred, male, cohort)
+
+save(imp, file = "Data/mice.Rdata")
+
+
+
+
 
 
 # 2. Descriptive Table ----
@@ -490,3 +526,15 @@ map_dfr(df_raw,
   ggplot() +
   aes(x = father_edu_level, y = p, color = cohort) +
   geom_point(position = position_dodge(0.8))
+
+
+
+# 1. TRY PATTERN MIXTURE WITH DIFFERENT PARAMETERS FOR DIFFERENCE IN HEIGHT IN 4 COHORTS
+# 2. GET DIFFERENCES IN ESTIMATES AND PLOT ACCORDING TO PARAMETERS
+# 3. REGRESS HEIGHT_T ON COG_T & OBS_HEIGHT_T+1 & MALE TO SEE REASONABLE DIFFERENCE IN HEIGHT
+df_height %>%
+  distinct(cohort, age_height) %>%
+  mutate(age_x = age_height) %>%
+  complete(age_height, age_x) %>%
+  drop_na(cohort) %>%
+  filter(age_height < age_x)
