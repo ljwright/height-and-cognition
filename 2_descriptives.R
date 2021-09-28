@@ -5,12 +5,13 @@ library(gallimaufr)
 library(ridittools)
 library(broom)
 library(summarytools)
-library(patchwork)
 library(magrittr)
 library(officer)
 library(flextable)
 library(furrr)
 library(tictoc)
+library(childsds)
+library(mice)
 
 rm(list = ls())
 
@@ -21,7 +22,8 @@ load_dta <- function(cohort){
     as_factor() %>%
     zap_label() %>%
     zap_formats() %>%
-    select(-matches("_chart_"))
+    select(-matches("_(chart|cog)_")) %>%
+    rename_with(~ str_replace(.x, "age_anth_", "age_"))
 }
 
 df_raw <- c("1946c", "1958c", "1970c", "2001c") %>%
@@ -44,6 +46,10 @@ df_raw$`2001c_white` <- df_raw$`2001c` %>%
   filter(ethnic_group == "White") %>%
   mutate(cohort = "2001c_white")
 
+df_raw$`1970c_measure` <- df_raw$`1970c` %>%
+  filter(height_16_report == 1) %>%
+  mutate(cohort = "1970c_measure")
+
 save(df_raw, file = "Data/df_raw.Rdata")
 
 
@@ -53,7 +59,7 @@ imp <- list()
 for(cohort in names(df_raw)){
   df <- df_raw[[cohort]] %>%
     select(id, cohort, survey_weight, male,
-           matches("^(bmi|height)"), matches("resid"),
+           matches("^age_..$"), matches("^(bmi|height)"), matches("resid"),
            mother_height, father_height,
            father_class, mother_edu_level, father_edu_level)
   
@@ -78,246 +84,225 @@ rm(df, df_mice, temp, pred, male, cohort)
 save(imp, file = "Data/mice.Rdata")
 
 
+# 3. Descriptive Tables ----
+load("Data/df_raw.Rdata")
+load("Data/mice.Rdata")
+
+imp_long <- map(imp,
+                ~ complete(.x, "long", TRUE) %>%
+                  as_tibble() %>%
+                  rename(imp = .imp) %>%
+                  select(-.id))
+rm(imp)
 
 
-
-
-# 2. Descriptive Table ----
-df_desc <- map(df_raw,
-               ~ .x %>%
-                 select(id, cohort, male, survey_weight,
-                        matches("(height_chart|maths|verbal|vocab)_"),
-                        father_class, mother_edu_level,
-                        father_height, mother_height))
-
-df_inv <- map(df_desc,
-              ~ .x %>%
-                select(-matches("_..$")))
-
-df_obs <- map(df_desc,
-              ~ names(.x) %>%
-                str_subset("_..$") %>%
-                str_sub(-2) %>%
-                unique()) %>%
-  map_dfr(~ tibble(age = .x), .id = "cohort") %>%
-  mutate(id = map2(cohort, age,
-                   ~ df_desc[[.x]] %>%
-                     drop_na(matches(glue("height_chart_{.y}"))) %>%
-                     pull(id))) %>%
-  unnest(id)
-
-save(df_obs, file = "Data/df_obs.Rdata")
-
-# Sample Size
-df_obs %>%
-  distinct(cohort, id) %>%
-  count(cohort) %>%
-  mutate(total = cumsum(n))
-
-
-# Make Tables
-table_1 <- function(cohort, age){
-  df_desc[[cohort]] %>%
-    select(id, all_of(glue("height_chart_{age}"))) %>%
-    drop_na() %>%
-    left_join(df_inv[[cohort]], by = "id") %>%
-    mutate(male = factor(male, labels = c("Female", "Male"))) %>%
-    # select(-survey_weight) %>%
-    get_desc("id") %>%
+# Time Invariant
+make_desc <- function(string_var = "cc", imp_var = NULL, weight_var = NULL){
+  if (is.null(imp_var)){
+    n_imp <- 0
+  } else{
+    n_imp <- 1:32
+  }
+  
+  map_dfr(imp_long,
+          ~ .x %>%
+            filter(imp %in% n_imp) %>%
+            select(id, any_of(weight_var), any_of(!!imp_var), 
+                   male, father_class, mother_edu_level,
+                   father_height, mother_height) %>%
+            mutate(male = factor(male, labels = c("Female", "Male"))) %>%
+            get_desc("id", imp_var = imp_var, weight_var = weight_var),
+          .id = "cohort") %>%
     select(-group_var) %>%
-    mutate(across(c(var, cat),
-                  ~ ifelse(str_detect(.x, "height_chart"), "height", .x)))
+    rename(!!string_var := string)
 }
 
 desc <- list()
-desc$tbl1_ord <- df_obs %>%
-  distinct(age, cohort) %>%
-  arrange(cohort, age) %>%
-  uncount(2) %>%
-  group_by(cohort, age) %>%
-  mutate(var = ifelse(row_number() == 1, "string", "miss")) %>%
-  unite("var", cohort, age, var) %>%
-  pull() %>%
-  str_subset("white", TRUE)
 
-desc$var_dict <- c(n = "Sample Size", survey_weight = "Survey Weight",
-                   male = "Sex", height = "Height",
+desc$var_dict <- c(n = "Sample Size", male = "Sex",
                    mother_height = "Maternal Height (cm)", 
                    father_height = "Paternal Height (cm)",
                    father_class = "Father's Social Class",
                    mother_edu_level = "Mother's Education")
 
-desc$df_1 <- df_obs %>%
-  distinct(cohort, age) %>%
-  filter(cohort != "2001c_white") %>%
-  mutate(tbl = map2(cohort, age, table_1)) %>%
-  unnest(tbl) %>%
-  unite("cohort", cohort, age) %>% 
+desc$col_order <- paste(
+  rep(c("cc", "miss", "mi"), times = 3),
+  rep(c("1946c", "1958c", "1970c", "2001c"), each = 3),
+  sep = "_"
+)
+
+desc$df_1 <- full_join(
+  make_desc(),
+  make_desc("mi", "imp", "survey_weight") %>%
+    select(-miss),
+  by = c("cohort", "var", "cat")
+) %>%
+  filter(str_length(cohort) == 5) %>%
   arrange(cohort, var, cat) %>%
   group_by(cohort, var) %>%
-  mutate(miss = ifelse(row_number() == 1 & !(var %in% c("height", "n")), miss, "")) %>%
+  mutate(miss = ifelse(row_number() == 1, miss, NA)) %>%
   ungroup() %>%
-  pivot_wider(names_from = cohort, values_from = c(string, miss), 
-              names_glue = "{cohort}_{.value}") %>%
-  mutate(var_clean = factor(desc$var_dict[var], desc$var_dict),
-         cat_clean = ifelse(var == cat, as.character(var_clean), cat),
-         .before = 1) %>%
-  arrange(var_clean, cat_clean) %>%
-  group_by(var_clean) %>%
-  mutate(var_clean = ifelse(var_clean == cat_clean, "", as.character(var_clean))) %>%
-  select(var_clean, cat_clean, all_of(desc$tbl1_ord))
+  pivot_wider(names_from = cohort, values_from = c(cc, miss, mi)) %>%
+  mutate(cat_clean = ifelse(var == cat, desc$var_dict[var], cat),
+         var_clean = ifelse(var == cat, NA, desc$var_dict[var]),
+         var = factor(var, names(desc$var_dict))) %>%
+  arrange(var) %>%
+  select(var_clean, cat_clean, all_of(desc$col_order))
 
 desc$tbl1_names <- names(desc$df_1)[-(1:2)]
 
-desc$tbl1_header <- ifelse(str_detect(desc$tbl1_names, "string"),
-                           "Mean (SD) /\n n (%)", "Missing %") %>%
+desc$tbl1_header <- case_when(str_detect(desc$tbl1_names, "cc_") ~ "Complete Cases",
+                              str_detect(desc$tbl1_names, "miss_") ~ "Missing %",
+                              str_detect(desc$tbl1_names, "mi_") ~ "Imputed Data") %>%
   set_names(desc$tbl1_names) %>%
   c(var_clean = "", cat_clean = "Variable") %>%
   as.list()
 
-desc$tbl1_span1 <- str_sub(desc$tbl1_names, 7, 8) %>%
-  paste("Age", .) %>%
+desc$tbl1_span <- str_sub(desc$tbl1_names, -5) %>%
   set_names(desc$tbl1_names) %>%
   c(var_clean = "", cat_clean = "") %>%
   as.list()
 
-desc$tbl1_span2 <- str_sub(desc$tbl1_names, 1, 4) %>%
-  set_names(desc$tbl1_names) %>%
-  c(var_clean = "", cat_clean = "") %>%
-  as.list()
-
-desc$flx_1 <- flextable(desc$df_1) %>%
-  set_header_labels(values = desc$tbl1_header) %>% 
-  add_header(., values = desc$tbl1_span1) %>%
-  add_header(., values = desc$tbl1_span2) %>%
-  border_remove() %>%
-  merge_v(1) %>%
-  merge_h(part = "header") %>% 
-  border(j = c(2, 6, 10, 14), 
-         border.right = fp_border(color = "grey50", width = 1, style = "dashed")) %>%
-  border_inner_h(border = fp_border(color = "grey50", width = 1, style = "dashed"),
-                 part = "body") %>% 
-  hline_top(border = fp_border(color = "black", width = 2), part = "all") %>% 
-  hline_bottom(border = fp_border(color = "black", width = 2), part = "all") %>%
-  fix_border_issues(part = "all") %>% 
-  align(j = 1:2, align = "right", part = "all") %>% 
-  align(j = 3:ncol(desc$df_1), align = "center", part = "all") %>% 
-  valign(j = 1, valign = "center") %>% 
-  font(fontname = "Times New Roman", part = "all") %>%
-  fontsize(size = 10, part = "all") %>% 
-  autofit()
+desc$flx_1 <- make_flx(desc$df_1, desc$tbl1_header, desc$tbl1_span) %>%
+  border(j = c(2, 5, 8, 11), 
+         border.right = fp_border(color = "grey50", width = 1, style = "dashed"))
 
 desc$flx_1 
 save_as_docx(desc$flx_1, path = "Tables/table_1.docx")
 
-
-# Table 2
-table_2 <- function(cohort, age){
-  df_desc[[cohort]] %>%
-    select(matches(age)) %>%
-    drop_na(matches("height_chart")) %>%
-    select(-matches("height_chart")) %>%
-    descr() %>%
-    tb() %>%
-    mutate(test = str_sub(variable, 1, -4),
-           missing = round(100 - pct.valid, 1) %>% paste0("%")) %>%
-    select(test, mean, min, max, sd, cv, missing) %>%
-    mutate(across(mean:cv, round, 1))
-}
-
-desc$test_dict <- c(maths = "Maths", verbal = "Verbal Similarities",
-                    vocab = "Vocabularly/Comprehension")
-
-desc$flx_2 <- df_obs %>%
-  distinct(cohort, age) %>%
-  filter(cohort != "2001c_white") %>%
-  mutate(tbl = map2(cohort, age, table_2)) %>%
-  unnest(tbl) %>%
-  filter(!str_detect(test, "resid")) %>%
-  mutate(age = ifelse(as.integer(age) < 14, 11, 16)) %>%
-  mutate(test = desc$test_dict[test],
-         test = glue("{test} @ Age {age}")) %>%
-  relocate(test, age, .before = 1) %>%
-  arrange(age, test, cohort) %>%
-  select(-age) %>%
+# Height
+desc$df_2 <- map_dfr(df_raw,
+                     ~ .x %>%
+                       select(matches("(maths|vocab|verbal)_..$")) %>%
+                       descr() %>%
+                       tb(),
+                     .id = "cohort") %>%
+  filter(str_length(cohort) == 5) %>%
+  mutate(test = str_sub(variable, 1, -4) %>% str_to_title(),
+         age = str_sub(variable, -2) %>% as.numeric(),
+         age_ref = ifelse(age < 14, 11, 16),
+         test = glue("{test} @ Age {age_ref}"),
+         n = format(n.valid, big.mark = ",") %>% trimws(),
+         missing = 100 - round(pct.valid, 1),
+         missing = glue("{missing}%")) %>%
+  select(test, cohort, n, missing, 
+         mean, min, max, sd, cv) %>%
+  mutate(across(mean:cv, round, 1)) %>%
   rename_with(str_to_title) %>%
   rename_with(str_to_upper, c(Sd, Cv)) %>%
-  make_flx()
+  arrange(Test, Cohort)
+
+desc$flx_2 <- make_flx(desc$df_2)
 
 desc$flx_2
 save_as_docx(desc$flx_2, path = "Tables/table_2.docx")
 
 
-# Cognition Density Plots
-df_dens <- map_dfr(df_desc,
+# 4. Descriptive Plots ----
+# Cognition and Raw Height Density Plots
+df_dens <- map_dfr(df_raw,
                    ~ .x %>%
-                     select(id, matches("_..$"), -matches("height"),
-                            -matches("_resid")) %>%
+                     select(id, matches("(maths|vocab|verbal|height)_..$")) %>%
                      pivot_longer(-id),
                    .id = "cohort") %>%
-  filter(cohort != "2001c_white") %>%
-  drop_na() %>%
+  filter(str_length(cohort) == 5) %>%
   separate(name, c("test", "age"), sep = "_") %>%
-  inner_join(df_obs, by = c("cohort", "id", "age")) %>%
-  mutate(age = ifelse(as.integer(age) < 14, 11, 16),
-         test = glue("{str_to_title(test)} @ Age {age}"))
+  # mutate(age = case_when(test == "height" ~ as.double(age),
+  #                        as.double(age) < 14 ~ 11,
+  #                        TRUE ~ 16)) %>%
+  mutate(test = glue("{cohort}: {str_to_title(test)} @ Age {age}"))
 
-df_ind <- df_dens %>%
-  group_by(cohort, test) %>%
-  filter(cohort != "2001c_white") %>%
-  descr(value) %>%
-  tb() %>%
-  mutate(missing = 100 - pct.valid) %>%
-  select(cohort, test, mean, min, max, sd, cv, missing) %>%
-  pivot_longer(-c(cohort, test)) %>%
-  mutate(value = round(value, 2),
-         name = ifelse(str_length(name) == 2, 
-                       str_to_upper(name),
-                       str_to_title(name)),
-         string = glue("{name} = {value}"),
-         string = ifelse(name == "Missing", glue("{string}%"), string)) %>%
-  group_by(cohort, test) %>%
-  summarise(string = glue_collapse(string, sep = "\n"),
-            .groups = "drop")
+get_stats <- function(df){
+  df %>%
+    group_by(cohort, test) %>%
+    descr(value) %>%
+    tb() %>%
+    mutate(missing = 100 - pct.valid) %>%
+    select(cohort, test, mean, min, max, sd, missing) %>%
+    pivot_longer(-c(cohort, test)) %>%
+    mutate(value = round(value, 1),
+           name = ifelse(str_length(name) == 2, 
+                         str_to_upper(name),
+                         str_to_title(name)),
+           string = glue("{name} = {value}"),
+           string = ifelse(name == "Missing", glue("{string}%"), string)) %>%
+    group_by(cohort, test) %>%
+    summarise(string = glue_collapse(string, sep = "\n"),
+              .groups = "drop")
+}
 
-plot_dens <- function(test){
-  p <- df_dens %>%
-    filter(test == !!test) %>%
+df_stat <- get_stats(df_dens)
+
+
+plot_dens <- function(height){
+  df_dens %>%
+    filter(str_detect(test, "Height") == !!height) %>%
     ggplot() +
     aes(x = value) +
-    facet_grid(test ~ cohort, scales = "free", 
-               switch = "y", space = "free_y") +
+    facet_wrap(test ~ ., ncol = ifelse(height, 5, 4),
+               scales = ifelse(height, "fixed", "free")) +
     geom_density(color = "grey50", fill = "grey70", alpha = 0.3) +
     geom_text(aes(x = -Inf, y = Inf, label = string), 
-              data = df_ind %>%  filter(test == !!test),
-              hjust = -0.1, vjust = 1.1, size = 2.5) +
+              data = filter(df_stat, str_detect(test, "Height") == !!height),
+              hjust = -0.1, vjust = 1.1,
+              size = 2.5) +
     labs(x = NULL, y = NULL) +
     theme_bw() +
     theme(strip.placement = "outside",
           strip.text.y.left = element_text(angle = 0),
           strip.background.y = element_blank())
-  
-  if (test != "Maths @ Age 11"){
-    p <- p + theme(strip.text.x = element_blank() , 
-                   strip.background.x = element_blank())
-  }
-  
-  return(p)
 }
 
-dens_p <- df_dens %>%
-  distinct(test) %>%
-  pull(test) %>%
-  map(plot_dens)
-
-dens_p[[1]] + dens_p[[2]] +
-  dens_p[[3]] + dens_p[[4]] +
-  plot_layout(nrow = 4)
+plot_dens(FALSE)
 ggsave("Images/figure_1.png", width = 29.7, 
        height = 21, dpi = 600, units = "cm")
 
-# 3. Correlations ----
-df_cor <- map(df_desc,
+
+plot_dens(TRUE)
+ggsave("Images/figure_2.png", width = 29.7, 
+       height = 21, dpi = 600, units = "cm")
+
+rm(df_dens, df_stat)
+
+
+# Height Chart
+df_chart <- map_dfr(df_raw,
+                ~ .x %>%
+                  select(id, male, matches("^(age|height)_..$")) %>%
+                  pivot_longer(-c(id, male)) %>%
+                  separate(name, c("test", "fup"), sep = "_") %>%
+                  pivot_wider(names_from = test, values_from = value),
+                .id = "cohort") %>%
+  filter(str_length(cohort) == 5) %>%
+  mutate(value = sds(height, age, male, "height",
+                     uk1990.ref, male = 1, female = 0),
+         test = glue("{cohort}: Height (Z-Score) @ Age {fup}"))
+
+df_height <- get_stats(df_chart)
+
+
+ggplot(df_chart) +
+  aes(x = value) +
+  facet_wrap(test ~ ., ncol = 5, scales = "fixed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_density(color = "grey50", fill = "grey70", alpha = 0.3) +
+  geom_text(aes(x = -Inf, y = Inf, label = string), 
+            data = df_height,
+            hjust = -0.1, vjust = 1.1,
+            size = 2.5) +
+  labs(x = NULL, y = NULL) +
+  theme_bw() +
+  theme(strip.placement = "outside",
+        strip.text.y.left = element_text(angle = 0),
+        strip.background.y = element_blank())
+ggsave("Images/figure_3.png", width = 29.7, 
+       height = 21, dpi = 600, units = "cm")
+
+rm(df_chart, df_height)
+
+
+# 5. Correlations ----
+df_cor <- map(df_raw,
               ~ .x %>%
                 select(matches("(height|resid|mother|father)")) %>%
                 mutate(father_class = as.numeric(father_class),
@@ -452,7 +437,7 @@ ggsave("Images/mcs_assortative.png", height = 9.9, width = 16,
 
 
 
-# 4. Attrition ----
+# 6. Attrition ----
 df_att <- map_dfr(df_raw,
                   ~ .x %>%
                     select(id, cohort, matches("^height_chart")) %>%

@@ -35,8 +35,9 @@ merge 1:1 bcsid using ///
 gen_age age_anth_10 examdatb examdatc `=ym(1970, 4)'
 
 gen_age age_anth_16 		rdoc_mt rdoc_yr `=ym(1970, 4)'
-gen_age age_anth_16_self 	hdoc_mt hdoc_mt `=ym(1970, 4)'
-replace age_anth_16 = age_anth_16_self if rd2_1 < 0 | missing(rd2_1)
+gen_age age_anth_16_self 	hdoc_mt hdoc_yr `=ym(1970, 4)'
+replace age_anth_16 = age_anth_16_self ///
+	if (rd2_1 < 0 | missing(rd2_1)) & ha1_2 >= 0 & !missing(ha1_2)
 drop age_anth_16_self
 
 * Cognitive Assessments

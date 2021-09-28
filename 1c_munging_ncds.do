@@ -9,11 +9,11 @@ merge 1:1 ncdsid using ///
 	
 
 // Age
-gen_age age_anth_11 n910 n911 `=ym(1958, 3)'
-gen_age age_anth_16 n2925 n2927 `=ym(1958, 3)'
+gen_age age_anth_11 n1470 n1471 `=ym(1958, 3)'
+gen_age age_anth_16 n1887 n1888 `=ym(1958, 3)'
 
-gen age_cog_11 = age_anth_11
-gen age_cog_16 = age_anth_16
+gen_age age_cog_11 n910 n911 `=ym(1958, 3)'
+gen_age age_cog_16 n2925 n2927 `=ym(1958, 3)'
 
 
 // Sex
